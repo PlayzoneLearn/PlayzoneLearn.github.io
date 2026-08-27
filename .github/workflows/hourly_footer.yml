@@ -1,0 +1,108 @@
+name: Cronjob
+
+on:
+  schedule:
+    - cron: '33 * * * *' # Triggers automatically at the start of every hour
+  workflow_dispatch:      # Provides a manual "Run workflow" button in GitHub
+
+jobs:
+  custom-tag:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.AUTO_FOOTER_TOKEN }} # Bypasses organization restrictions
+
+      - name: Fetch Remote Links
+        id: fetch_data
+        run: |
+          REMOTE_DATA=$(curl -s "https://gist.githubusercontent.com/raw/04f6645a22d39e92114a9270920e3f4b/gist.txt")
+          echo "data<<EOF" >> $GITHUB_OUTPUT
+          echo "$REMOTE_DATA" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Shuffle and Build 3 Random HTML Links
+        run: |
+          > temp_anchors.txt
+          
+          # 1. Filter out empty lines first
+          CLEAN_LINES=$(echo "${{ steps.fetch_data.outputs.data }}" | grep -v '^ *$')
+          
+          # 2. shuf -n 3 randomly picks exactly 3 unique lines from the list
+          RANDOM_THREE=$(echo "$CLEAN_LINES" | shuf -n 3)
+          
+          # 3. Process the chosen 3 lines into anchors
+          while IFS= read -r line; do
+            if [ ! -z "$line" ]; then
+              clean_line=$(echo "$line" | tr -d '\r')
+              
+              if [[ "$clean_line" == *"|"* ]]; then
+                url=$(echo "$clean_line" | cut -d'|' -f1 | xargs)
+                text=$(echo "$clean_line" | cut -d'|' -f2 | xargs)
+              else
+                url=$(echo "$clean_line" | xargs)
+                text="$url"
+              fi
+              
+              echo "  <a href=\"$url\">$text</a>" >> temp_anchors.txt
+            fi
+          done <<< "$RANDOM_THREE"
+
+      - name: Process Custom Tag Replacement
+        shell: python
+        run: |
+          import os
+          import re
+
+          # Read the 3 newly generated random anchors
+          with open("temp_anchors.txt", "r", encoding="utf-8") as f:
+              new_links = f.read().strip()
+
+          open_tag = "<custom-links>"
+          close_tag = "</custom-links>"
+          fresh_payload = f"{open_tag}\n{new_links}\n{close_tag}"
+
+          custom_tag_pattern = re.compile(r"<custom-links>.*?</custom-links>", re.DOTALL)
+
+          for root, dirs, files in os.walk("."):
+              for file in files:
+                  if file.endswith(".html") and file != "temp_anchors.txt":
+                      file_path = os.path.join(root, file)
+                      
+                      with open(file_path, "r", encoding="utf-8") as f:
+                          file_content = f.read()
+                      
+                      # Run 2 onwards: Update existing tags
+                      if open_tag in file_content and close_tag in file_content:
+                          updated_html = custom_tag_pattern.sub(fresh_payload, file_content)
+                      
+                      # First time run: Inject right before </footer>
+                      elif "</footer>" in file_content:
+                          first_run_injection = f"{fresh_payload}</footer>"
+                          updated_html = file_content.replace("</footer>", first_run_injection)
+                      
+                      else:
+                          continue
+                      
+                      with open(file_path, "w", encoding="utf-8") as f:
+                          f.write(updated_html)
+                          
+          print("Randomized custom tag updates completed across all pages.")
+
+      - name: Clean Up Temp File
+        run: rm temp_anchors.txt
+
+      - name: Commit and Push Changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          git add .
+          if git diff --staged --quiet; then
+            echo "The randomly selected links matched last hour exactly. Skipping push."
+          else
+            git commit -m "update"
+            git push
+          fi
